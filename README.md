@@ -1,5 +1,5 @@
 
-# Show Update Applicabilty Rule
+# Show Update Applicability Rule
 
 # Introduction
 
