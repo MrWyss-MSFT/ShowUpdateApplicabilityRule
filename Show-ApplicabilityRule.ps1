@@ -13,8 +13,9 @@
 .NOTES  
     File Name   : Show-ApplicabilityRule.ps1
     Author      : marius.wyss@microsoft.com
-    Version     : 3.0
-    ChangeLog   : 29. Jul 2019 - V3.0 - Introduced Parameter Set to avoid empty UpdateSarchstring or emtpy UpdateID and RevisionNumber
+    Version     : 3.1
+    ChangeLog   : 13. Aug 2020 - V3.1 - JOH: GridView in case of multiple updates while using search string. Readability changes. Also added open in Browser feature. Open Forms on top.
+                  29. Jul 2019 - V3.0 - Introduced Parameter Set to avoid empty UpdateSarchstring or emtpy UpdateID and RevisionNumber
                   27. May 2019 - V2.0 - Added TreeView thanks to Ivan Yankulov https://www.sptrenches.com/2017/08/build-treevie-xml-powershell.html
                   27. May 2019 - V1.1 - minor refactoring and invoke-sqlcmd2 got error handling to avoid open connections
                   26. May 2019 - V1.0 - initial version
@@ -26,17 +27,34 @@
     CONNECTION WITH THE USE OF THIS CODE AND INFORMATION REMAINS WITH THE USER.
 #>
 [CmdletBinding(DefaultParametersetName='Script')] 
-param( 
+param
+( 
     # Use UpdateSearchString or UpdateID and RevisionNumber to find the Update
-    [Parameter(Position=0,Mandatory=$true)] [string]$SQLServer, # e.g. = sqlserver.domain.com
-    [Parameter(Position=1,Mandatory=$true)] [string]$SQLDBName, # e.g. = SUSDB
-    [Parameter(ParameterSetName='Script',Mandatory=$true)][string]$UpdateSearchString, # e.g. = "%Office 365 Client Update - First Release for Current Channel Version 1706 for x64 based Edition (Build 8229.2056)%",     
-    [Parameter(ParameterSetName='Extension',Mandatory=$true)][string]$UpdateID,
-    [Parameter(ParameterSetName='Extension',Mandatory=$true)][string]$RevisionNumber
+    [Parameter(Position=0,Mandatory=$true,HelpMessage='Please enter a valid SQL Server FQDN and the instance name in case of a named instance like so: SQLServerFQDN\InstanceName')] 
+    [ValidateNotNullOrEmpty()]
+    [string]$SQLServer, # e.g. = sqlserver.domain.com
+
+    [Parameter(Position=1,Mandatory=$true,HelpMessage='Please enter the name of the WSUS database')] 
+    [ValidateNotNullOrEmpty()]
+    [string]$SQLDBName, #= 'SUSDB', 
+
+    [Parameter(ParameterSetName='Script',Mandatory=$true,HelpMessage='Please enter a search string to search for an update. Example: %Update for Server 2019%')]
+    [string]$UpdateSearchString, # e.g. = "%Office 365 Client Update - First Release for Current Channel Version 1706 for x64 based Edition (Build 8229.2056)%",    
+
+    [Parameter(ParameterSetName='Script',Mandatory=$false)]
+    [switch]$OpenInBrowser,
+     
+    [Parameter(ParameterSetName='Extension',Mandatory=$true)]
+    [string]$UpdateID,
+
+    [Parameter(ParameterSetName='Extension',Mandatory=$true)]
+    [string]$RevisionNumber
 )
 
 $ParamSetName = $PsCmdLet.ParameterSetName
-Function Invoke-Sqlcmd2 {
+
+Function Invoke-Sqlcmd2 
+{
     [CmdLetBinding()]
     Param
     (
@@ -52,6 +70,7 @@ Function Invoke-Sqlcmd2 {
         # Prepare SQL-Connection-Object
         $SqlConnection = New-Object System.Data.SqlClient.SqlConnection
         $SqlConnection.StatisticsEnabled = $False
+        # WID "\\.\pipe\MICROSOFT##WID\tsql\query" # for future releases
         $SqlConnection.ConnectionString = "Server = $Server; Database = $Database; Integrated Security = True"
         $SqlConnection.Open()
     
@@ -84,8 +103,13 @@ Function Invoke-Sqlcmd2 {
     }
 }
 
-Function Get-UpdateIDAndRevision {
-    Param ([string]$UpdateSearchString)
+Function Get-UpdateIDAndRevision 
+{
+    Param
+    (
+        [string]$UpdateSearchString
+    )
+
     $sql_GetUpdateAndRevision = @'
 DECLARE @SearchString AS Nvarchar(255) = '{0}';
 DECLARE @UpdateID AS uniqueidentifier;
@@ -94,24 +118,37 @@ SELECT * FROM PUBLIC_VIEWS.vUpdate WHERE DefaultTitle like @SearchString and IsD
 '@ -f $UpdateSearchString
           
     $UpdAndRev = Invoke-Sqlcmd2 -Server $SQLServer -Database $SQLDBName -SQLQuery $sql_GetUpdateAndRevision
-    $UpdAndRev
+    return $UpdAndRev
 
 }
-Function Get-UpdateDetails {
-    Param ([string]$UpdateID, [String]$RevisionNumber)
+Function Get-UpdateDetails 
+{
+    Param
+    (
+        [string]$UpdateID,
+        [String]$RevisionNumber
+    )
+
     $sql_GetUpdateAndRevision = "SELECT * FROM PUBLIC_VIEWS.vUpdate WHERE UpdateID='{0}' and RevisionNumber = '{1}'" -f $UpdateID, $RevisionNumber
     $Update = Invoke-Sqlcmd2 -Server $SQLServer -Database $SQLDBName -SQLQuery $sql_GetUpdateAndRevision
-    $Update
+    return $Update
 
 }
 
-#$level = 0
-function Get-UpdateXML {
-    param(  [string]$UpdateID,
+$level=0
+function Get-UpdateXML 
+{
+    param
+    (  
+        [string]$UpdateID,
         [string]$UpdateRevision
     )
+
     $level++
-    if ($level -ge 2) { write-host "Bundle Update" }
+    if($level -ge 2)
+    { 
+        write-host "The selected update is a bundled Update. Need to load more data..." -ForegroundColor Green
+    }
     
     $sql_getxml = @'
 DECLARE @XMLID AS int;
@@ -143,6 +180,7 @@ SELECT ISNULL(datalength(RootElementXmlCompressed), 0) size, RootElementXmlCompr
     [System.Xml.XmlDocument]$doc = new-object System.Xml.XmlDocument;
     $doc.set_PreserveWhiteSpace( $true );
     $doc.Load( $xml );
+    
     Remove-Item $xml -Force
 
     $root = $doc.get_DocumentElement();
@@ -150,8 +188,10 @@ SELECT ISNULL(datalength(RootElementXmlCompressed), 0) size, RootElementXmlCompr
     $xml = '<?xml version="1.0" encoding="utf-8"?>' + $xml
 
     $newFile = $($tmpfile.FullName) + ".utf8.xml"
-    Set-Content -Encoding UTF8 $newFile $xml;
+    Set-Content -Encoding UTF8 $newFile $xml -Force;
     $utf8xml = [xml](Get-Content $newFile)
+    # for open in browser function
+    $global:newXmlFilePath = $newFile
     # Refactoring
     If ($null -ne $utf8xml.Update.Relationships.BundledUpdates.UpdateIdentity) {
         Write-Debug "Bundled Update"
@@ -161,11 +201,19 @@ SELECT ISNULL(datalength(RootElementXmlCompressed), 0) size, RootElementXmlCompr
         $utf8xml = Get-UpdateXML -UpdateID $UpdateID -UpdateRevision $UpdateRevisionNumber
     
     }
-    Remove-Item $newFile -Force
+
+
     #endregion
     return [System.Xml.XmlDocument]$utf8xml
 }
-function Format-XML ([xml]$xml) {
+
+
+function Format-XML
+{
+    param
+    (
+        [xml]$xml
+    ) 
     $StringWriter = New-Object System.IO.StringWriter;
     $XmlWriter = New-Object System.Xml.XmlTextWriter $StringWriter;
     $XmlWriter.Formatting = "indented";
@@ -174,8 +222,14 @@ function Format-XML ([xml]$xml) {
     $StringWriter.Flush();
     Write-Output $StringWriter.ToString();
 }
-Function Get-ApplicabilityRules {
-    param ([System.Xml.XmlDocument]$UpdateXML)
+
+Function Get-ApplicabilityRules 
+{
+    param 
+    (
+        [System.Xml.XmlDocument]$UpdateXML
+    )
+
     #$isinstalled = $UpdateXML.Update.ApplicabilityRules.IsInstalled.InnerXml
     #$isInstallable = $UpdateXML.Update.ApplicabilityRules.IsInstallable.InnerXml
 
@@ -229,94 +283,129 @@ function Add-NodesToTreeview($xElement, $fNode) {
 
 
 #region Business Logic
+$global:newXmlFilePath = "nothing yet"
 Try {
     
     if ($ParamSetName -eq "Extension") {
-        Write-Host "Using UpdateID and Revision"
-        $Update = Get-UpdateDetails -UpdateID $UpdateID -RevisionNumber $RevisionNumber
+        Write-Host "Using UpdateID `"$UpdateID`" and Revision `"$RevisionNumber`"" -ForegroundColor Green
+        $selectedUpdate = Get-UpdateDetails -UpdateID $UpdateID -RevisionNumber $RevisionNumber
      
     }
     elseif ($ParamSetName -eq "Script") {
-        Write-Host "Using SearchString"
+        Write-Host "Using SearchString: `"$UpdateSearchString`"" -ForegroundColor Green
         $Update = Get-UpdateIDAndRevision -UpdateSearchString $UpdateSearchString
-        [string]$UpdateID = $Update.UpdateID
-        [string]$RevisionNumber = $Update.RevisionNumber
+        if($update)
+        {
+            if($update[0] -gt 1)
+            {
+                Write-host "Found $($update[0]) updates" -ForegroundColor Green
+                $selectedUpdate = $update | Select-Object UpdateID,DefaultTitle,RevisionNumber,ArrivalDate,CreationDate -Skip 1  | Out-GridView -Title 'PLease select a single update' -OutputMode Single
+            }
+            else
+            {
+                $selectedUpdate = $update[1]
+            }
+        }
+        else
+        {
+            Write-host 'Nothing found. End script!' -ForegroundColor Green
+        }
+
     } else {
-        Write-Host "No Parameters given"
+        Write-Host "No Parameters given. End script!" -ForegroundColor Green
     }
 
+
+    if($selectedUpdate)
+    {
+        Write-Host "Selected update: `"$($selectedUpdate.DefaultTitle)`"" -ForegroundColor Green
+
+        [string]$UpdateID = $selectedUpdate.UpdateID
+        [string]$RevisionNumber = $selectedUpdate.RevisionNumber
+
     
-    $UpdateXML = Get-UpdateXML -UpdateID $UpdateID -UpdateRevision $RevisionNumber
-    $Ar = Get-ApplicabilityRules -Update $UpdateXML
+        $UpdateXML = Get-UpdateXML -UpdateID $UpdateID -UpdateRevision $RevisionNumber
+        $Ar = Get-ApplicabilityRules -Update $UpdateXML
 
-    #region ShowDialog  
-    $RootElementName = "ApplicabilityRules"
-    $xml = [xml]$Ar
+        if($OpenInBrowser)
+        {
+            Invoke-Item $global:newXmlFilePath
+        }
+        else
+        {
+            
+            #region ShowDialog  
+            $RootElementName = "ApplicabilityRules"
+            $xml = [xml]$Ar
     
-    
-    [void][System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms")
+            [void][System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms")
 
-    $FormWidth = 1024
-    $FormHeight = 730
-    $SidePanel = 300
-    $TreeViewText = "Treeview: Double Click with copy entire node."
-    $TextViewText = "TextView: select and copy."
+            $FormWidth = 1024
+            $FormHeight = 730
+            $SidePanel = 300
+            $TreeViewText = "Treeview: Double Click with copy entire node."
+            $TextViewText = "TextView: select and copy."
 
-    $FORM = new-object Windows.Forms.Form    
-    $FORM.text = "Form-DisplayDirExplorer"
-    $FORM = new-object Windows.Forms.Form
-    $FORM.Size = new-object System.Drawing.Size($FormWidth, $FormHeight)    
-    $FORM.text = "Update XML"
+            $FORM = new-object Windows.Forms.Form    
+            $FORM.text = "Form-DisplayDirExplorer"
+            $FORM = new-object Windows.Forms.Form
+            $FORM.Size = new-object System.Drawing.Size($FormWidth, $FormHeight)    
+            $FORM.text = "Update XML"
+            $FORM.TopMost = $true
 
 
-    $TREEVIEW = new-object windows.forms.TreeView 
-    $TREEVIEW.Width = $($FormWidth - $SidePanel)
-    $TREEVIEW.Height = $FormHeight
-    $TREEVIEW.Anchor = "right, left, top, bottom"
-    $TREEVIEW.AutoSize = $false
+            $TREEVIEW = new-object windows.forms.TreeView 
+            $TREEVIEW.Width = $($FormWidth - $SidePanel)
+            $TREEVIEW.Height = $FormHeight
+            $TREEVIEW.Anchor = "right, left, top, bottom"
+            $TREEVIEW.AutoSize = $false
 
-    $tbARText = New-Object system.Windows.Forms.TextBox
-    $tbARText.multiline = $true
-    $tbARText.AutoSize = $false
-    $tbARText.text = $xml.InnerXml
-    $tbARText.width = $($FormWidth - $SidePanel)
-    $tbARText.height = $FormHeight
-    $tbARText.Anchor = "right, left, top, bottom"
-    $tbARText.Font = 'Microsoft Sans Serif,8'
+            $tbARText = New-Object system.Windows.Forms.TextBox
+            $tbARText.multiline = $true
+            $tbARText.AutoSize = $false
+            $tbARText.text = $xml.InnerXml
+            $tbARText.width = $($FormWidth - $SidePanel)
+            $tbARText.height = $FormHeight
+            $tbARText.Anchor = "right, left, top, bottom"
+            $tbARText.Font = 'Microsoft Sans Serif,8'
 
-    $Label1 = New-Object system.Windows.Forms.Label
-    $Label1.text = $TreeViewText
-    $Label1.AutoSize = $true
-    $Label1.width = $($SidePanel - 10)
-    $Label1.height = 10
-    $Label1.Anchor = "right, top"
-    $Label1.location = New-Object System.Drawing.Point($(($FormWidth - $SidePanel + 10)), 10)
-    $Label1.Font = 'Microsoft Sans Serif,10'
+            $Label1 = New-Object system.Windows.Forms.Label
+            $Label1.text = $TreeViewText
+            $Label1.AutoSize = $true
+            $Label1.width = $($SidePanel - 10)
+            $Label1.height = 10
+            $Label1.Anchor = "right, top"
+            $Label1.location = New-Object System.Drawing.Point($(($FormWidth - $SidePanel + 10)), 10)
+            $Label1.Font = 'Microsoft Sans Serif,10'
 
-    $Button1 = New-Object system.Windows.Forms.Button
-    $Button1.text = "Switch to TextView"
-    $Button1.width = 180
-    $Button1.height = 30
-    $Button1.Anchor = "right, top"
-    $Button1.location = New-Object System.Drawing.Point($(($FormWidth - $SidePanel + 10)), 100)
-    $Button1.Font = 'Microsoft Sans Serif,10'
-    $Button1.Add_Click( { Switch-View $this $_Test })
+            $Button1 = New-Object system.Windows.Forms.Button
+            $Button1.text = "Switch to TextView"
+            $Button1.width = 180
+            $Button1.height = 30
+            $Button1.Anchor = "right, top"
+            $Button1.location = New-Object System.Drawing.Point($(($FormWidth - $SidePanel + 10)), 100)
+            $Button1.Font = 'Microsoft Sans Serif,10'
+            $Button1.Add_Click( { Switch-View $this $_Test })
 
-    $TREEVIEW.add_NodeMouseDoubleClick( {
-            [Windows.Forms.Clipboard]::SetText($TREEVIEW.SelectedNode.Tag.ToString());
-        })
+            $TREEVIEW.add_NodeMouseDoubleClick( {
+                    [Windows.Forms.Clipboard]::SetText($TREEVIEW.SelectedNode.Tag.ToString());
+                })
 
-    $firstElement = $xml.$RootElementName
-    $tn = new-object System.Windows.Forms.TreeNode
-    $tn.Text = $firstElement.OuterXml.Split(">")[0] + ">"
-    $tn.Tag = $firstElement.OuterXml
+            $firstElement = $xml.$RootElementName
+            $tn = new-object System.Windows.Forms.TreeNode
+            $tn.Text = $firstElement.OuterXml.Split(">")[0] + ">"
+            $tn.Tag = $firstElement.OuterXml
 
-    [void]$TREEVIEW.Nodes.Add($tn)
+            [void]$TREEVIEW.Nodes.Add($tn)
 
-    Add-NodesToTreeview -xElement $firstElement -fNode $tn
-    $Form.controls.AddRange(@($TREEVIEW, $Label1, $Button1))
+            Add-NodesToTreeview -xElement $firstElement -fNode $tn
+            $Form.controls.AddRange(@($TREEVIEW, $Label1, $Button1))
 
-    $Form.ShowDialog()
+            $Form.ShowDialog()
+
+        } # end if($OpenInBrowser)
+    } # end if($selectedUpdate)
+    Write-host 'End of script!' -ForegroundColor Green
 }
 catch {
     Write-host "Exception Type: $($_.Exception.GetType().FullName)" -ForegroundColor Red
