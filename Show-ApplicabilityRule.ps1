@@ -13,8 +13,9 @@
 .NOTES  
     File Name   : Show-ApplicabilityRule.ps1
     Author      : marius.wyss@microsoft.com
-    Version     : 3.1
-    ChangeLog   : 13. Aug 2020 - V3.1 - JOH: GridView in case of multiple updates while using search string. Readability changes. Also added open in Browser feature. Open Forms on top.
+    Version     : 3.2
+    ChangeLog   : 18. Nov 2026 - V3.2 - CBAS: Automatic failover to Windows Internal Database (WID) (2012+) if specified Server/DB doesn't exist, or exists but does not contain expected schema.
+				  13. Aug 2020 - V3.1 - JOH: GridView in case of multiple updates while using search string. Readability changes. Also added open in Browser feature. Open Forms on top.
                   29. Jul 2019 - V3.0 - Introduced Parameter Set to avoid empty UpdateSarchstring or emtpy UpdateID and RevisionNumber
                   27. May 2019 - V2.0 - Added TreeView thanks to Ivan Yankulov https://www.sptrenches.com/2017/08/build-treevie-xml-powershell.html
                   27. May 2019 - V1.1 - minor refactoring and invoke-sqlcmd2 got error handling to avoid open connections
@@ -70,22 +71,80 @@ Function Invoke-Sqlcmd2
         # Prepare SQL-Connection-Object
         $SqlConnection = New-Object System.Data.SqlClient.SqlConnection
         $SqlConnection.StatisticsEnabled = $False
-        # WID "\\.\pipe\MICROSOFT##WID\tsql\query" # for future releases
+        $WID = "\\.\pipe\MICROSOFT##WID\tsql\query" # Server 2012+
         $SqlConnection.ConnectionString = "Server = $Server; Database = $Database; Integrated Security = True"
-        $SqlConnection.Open()
-    
+
         # Prepare SQL-Command-Object
         $SqlCmd = New-Object System.Data.SqlClient.SqlCommand
-        $SqlCmd.CommandText = $SqlQuery
-        $SqlCmd.Connection = $SqlConnection
+		$SqlCmd.CommandText = @'
+		IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.VIEWS
+		WHERE TABLE_SCHEMA = 'PUBLIC_VIEWS' AND TABLE_NAME = 'vUpdate')
+		SELECT 'True' AS Table_Found
+		ELSE
+		SELECT 'False' AS Table_Found
+'@
 
- 
         # Prepare SQL-Adapter-Object for the Select-Exectuion
         $SqlAdapter = New-Object System.Data.SqlClient.SqlDataAdapter
         $SqlAdapter.SelectCommand = $SqlCmd
+
+        # And dataset 
+        $Dataset = New-object System.Data.Dataset
+
+		try { 
+			Write-Verbose "Attempting SQL Connection to Server = $Server; Database = $Database"
+			$SqlConnection.Open() 
+			#$SqlCmd.CommandText = $SqlQuery
+			$SqlCmd.Connection = $SqlConnection
+			# Verify the database is the WSUS Database (has the necessary views)
+			Write-Verbose "Verifying view exists..."
+			
+			[void]$SqlAdapter.Fill($DataSet)
+			
+			if ($DataSet.Tables[0].Rows[0].Table_Found = 'False') {
+					# This isn't the WSUS database.  Fallback on WID.
+					$SqlConnection.Close()
+					Write-Verbose "Invalid database - DB lacks expected tables present in WSUS."
+					Write-Verbose "Attempting fallback to Windows Internal Database (WID)..."
+					$Server = "\\.\pipe\MICROSOFT##WID\tsql\query"
+					$Database = "SUSDB"
+					$script:SQLServer = $Server
+					$script:SQLDBName = $Database
+					$SqlConnection.ConnectionString = "Server=$Server;Database=$Database;Trusted_Connection=True;"
+					try {
+						$SqlConnection.Open()
+					}
+					Catch {
+						Write-host "Exception Type: $($_.Exception.GetType().FullName)" -ForegroundColor Red
+						Write-host "Exception Message: $($_.Exception.Message)" -ForegroundColor Red
+						Write-host "Exception Stack: $($_.ScriptStackTrace)"
+						break
+					}
+			} else { 
+				Write-Verbose "Table found: $($DataSet.Tables[0].Rows[0].Table_Found)"
+			}
+		}
+		catch {
+			Write-Verbose "SQL Connection failed.  Attempting fallback to Windows Internal Database (WID)..."
+			$Server = "\\.\pipe\MICROSOFT##WID\tsql\query"
+			$Database = "SUSDB"
+			$script:SQLServer = $Server
+			$script:SQLDBName = $Database
+			$SqlConnection.ConnectionString = "Server=$Server;Database=$Database;Trusted_Connection=True;"
+			$SqlConnection.Open()
+		}
+    
+        # Prepare actual query
+		$SqlCmd.CommandText = $SqlQuery
+        $SqlCmd.Connection = $SqlConnection
+		$SqlAdapter.SelectCommand = $SqlCmd
+		if ($DataSet.Tables[0]) { 
+            # Reinitialize the Dataset if we've used it previously
+            $DataSet = New-object System.Data.Dataset 
+        }
+
  
         # Prepare DataSet with the values of the Select-Statement
-        $Dataset = New-object System.Data.Dataset
         $SqlAdapter.Fill($Dataset)
         $Dataset.Tables[0]    
     }
